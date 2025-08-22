@@ -8,20 +8,14 @@ from time import time
 from typing import Dict, Tuple, Any, Optional
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, quote
-from fastapi import FastAPI
-from .browser_fetch import shutdown_pool
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, HttpUrl
 
-app = FastAPI()
-
-@app.on_event("shutdown")
-async def _shutdown():
-await shutdown_pool()
-
+from .browser_fetch import shutdown_pool
 from .seo import analyze as analyze_url
 from .db import init_db, save_analysis
 
@@ -32,7 +26,16 @@ if sys.platform.startswith("win"):
     except Exception:
         pass
 
-app = FastAPI(title="SEO Analyzer")
+# ---- Lifespan handles startup/shutdown cleanly
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup
+    init_db()
+    yield
+    # shutdown
+    await shutdown_pool()
+
+app = FastAPI(title="SEO Analyzer", lifespan=lifespan)
 
 # ---- Templates dir (app/templates by default; overridable via env)
 BASE_DIR = Path(__file__).resolve().parent
@@ -176,12 +179,6 @@ async def _warm_compare_async(url: str):
         pass
 
 
-# ---- Startup
-@app.on_event("startup")
-async def on_startup():
-    init_db()
-
-
 # ---- Pages
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
@@ -251,7 +248,7 @@ async def api_analyze(url: HttpUrl):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-# ---- AMP vs Non-AMP comparison page (unchanged feature)
+# ---- AMP vs Non-AMP comparison page
 @app.get("/amp-compare", response_class=HTMLResponse)
 async def amp_compare(request: Request, url: str):
     cached = _compare_cache_get(url)
