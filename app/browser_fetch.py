@@ -1,3 +1,4 @@
+# app/browser_fetch.py
 from __future__ import annotations
 
 import os
@@ -20,7 +21,6 @@ _WAIT_ALIASES = {
     "documentloaded": "domcontentloaded",
     "document_loaded": "domcontentloaded",
     "domcontentloaded()": "domcontentloaded",
-    "domcontentLoaded": "domcontentloaded",
     "domContentLoaded": "domcontentloaded",
 
     # network idle variants / typos
@@ -41,7 +41,6 @@ _DEFAULT_UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-
 @dataclass
 class RenderResult:
     status: Optional[int]
@@ -51,7 +50,6 @@ class RenderResult:
     console_logs: List[str]
     timing_ms: int
     screenshot_path: Optional[str] = None
-
 
 class _BrowserPool:
     """Lightweight Playwright Chromium pool for concurrent scans."""
@@ -95,12 +93,10 @@ class _BrowserPool:
             finally:
                 await context.close()
 
-
 _POOL = _BrowserPool(
     headless=(os.getenv("PLAYWRIGHT_HEADLESS", "1").lower() not in ("0", "false", "no")),
     max_contexts=int(os.getenv("PLAYWRIGHT_MAX_CONTEXTS", "4")),
 )
-
 
 async def fetch_rendered(
     url: str,
@@ -114,20 +110,30 @@ async def fetch_rendered(
 ) -> RenderResult:
     from time import monotonic
 
-    # Normalize wait_until from arg/env
+    # Normalize desired wait state (we'll do it manually after goto)
     env_wait = os.getenv("PLAYWRIGHT_WAIT_UNTIL", "networkidle")
-    wait_until = _normalize_wait_until(wait_until or env_wait, default="networkidle")
+    desired_wait = _normalize_wait_until(wait_until or env_wait, default="networkidle")
 
     start = monotonic()
     async with _POOL.page(
         user_agent=user_agent,
         viewport={"width": viewport[0], "height": viewport[1]},
     ) as (page, logs):
+        # Navigate first with minimal blocking, then wait for the state we want.
+        # This avoids quirky errors like "Page.goto: 'str' object is not callable".
         try:
-            resp = await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+            resp = await page.goto(url, wait_until="commit", timeout=timeout_ms)
         except Exception:
-            # last-resort fallback if a bad token slipped through somehow
-            resp = await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            # last-resort: try again with Playwright default (load)
+            resp = await page.goto(url, timeout=timeout_ms)
+
+        # Now wait explicitly for the requested state (skip if 'commit')
+        if desired_wait in ("load", "domcontentloaded", "networkidle"):
+            try:
+                await page.wait_for_load_state(desired_wait, timeout=timeout_ms)
+            except Exception:
+                # don't fail the whole scan if a site never reaches the state
+                pass
 
         # Nudge lazy content
         for _ in range(3):
@@ -169,7 +175,6 @@ async def fetch_rendered(
         timing_ms=int((end - start) * 1000),
         screenshot_path=shot,
     )
-
 
 async def shutdown_pool():
     await _POOL.stop()
