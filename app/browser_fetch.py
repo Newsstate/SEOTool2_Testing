@@ -1,4 +1,3 @@
-# app/browser_fetch.py
 from __future__ import annotations
 
 import os
@@ -9,6 +8,33 @@ from typing import Dict, Optional, Tuple, List
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
+# ---- wait_until normalization ----
+_ALLOWED_WAITS = {"load", "domcontentloaded", "networkidle", "commit"}
+_WAIT_ALIASES = {
+    # DOM loaded variants
+    "dom": "domcontentloaded",
+    "dom_loaded": "domcontentloaded",
+    "domcontent": "domcontentloaded",
+    "dom-content-loaded": "domcontentloaded",
+    "domcontentloaded": "domcontentloaded",
+    "documentloaded": "domcontentloaded",
+    "document_loaded": "domcontentloaded",
+    "domcontentloaded()": "domcontentloaded",
+    "domcontentLoaded": "domcontentloaded",
+    "domContentLoaded": "domcontentloaded",
+
+    # network idle variants / typos
+    "network_idle": "networkidle",
+    "network-idle": "networkidle",
+    "networkidle()": "networkidle",
+    "networkIdle": "networkidle",
+    "idle": "networkidle",
+}
+
+def _normalize_wait_until(val: Optional[str], default: str = "networkidle") -> str:
+    v = (val or "").strip().lower()
+    v = _WAIT_ALIASES.get(v, v)
+    return v if v in _ALLOWED_WAITS else default
 
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -79,7 +105,7 @@ _POOL = _BrowserPool(
 async def fetch_rendered(
     url: str,
     *,
-    wait_until: str = "networkidle",     # 'load' | 'domcontentloaded' | 'networkidle'
+    wait_until: Optional[str] = None,   # allow None → read env/default
     wait_ms_after: int = 800,
     timeout_ms: int = 30000,
     user_agent: str = _DEFAULT_UA,
@@ -88,12 +114,20 @@ async def fetch_rendered(
 ) -> RenderResult:
     from time import monotonic
 
+    # Normalize wait_until from arg/env
+    env_wait = os.getenv("PLAYWRIGHT_WAIT_UNTIL", "networkidle")
+    wait_until = _normalize_wait_until(wait_until or env_wait, default="networkidle")
+
     start = monotonic()
     async with _POOL.page(
         user_agent=user_agent,
         viewport={"width": viewport[0], "height": viewport[1]},
     ) as (page, logs):
-        resp = await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+        try:
+            resp = await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+        except Exception:
+            # last-resort fallback if a bad token slipped through somehow
+            resp = await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
 
         # Nudge lazy content
         for _ in range(3):
@@ -103,7 +137,7 @@ async def fetch_rendered(
         if wait_ms_after:
             await asyncio.sleep(wait_ms_after / 1000)
 
-        # Heuristic: wait for main content if it appears quickly
+        # Heuristic: wait for common content containers if they appear quickly
         try:
             await page.wait_for_selector("main, article, #content, .content", timeout=1500)
         except Exception:
