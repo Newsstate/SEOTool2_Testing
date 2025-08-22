@@ -1,4 +1,3 @@
-# app/browser_fetch.py
 from __future__ import annotations
 
 import os
@@ -21,7 +20,7 @@ _WAIT_ALIASES = {
     "documentloaded": "domcontentloaded",
     "document_loaded": "domcontentloaded",
     "domcontentloaded()": "domcontentloaded",
-    "domContentLoaded": "domcontentloaded",
+    "domcontentLoaded": "domcontentloaded",
 
     # network idle variants / typos
     "network_idle": "networkidle",
@@ -87,7 +86,28 @@ class _BrowserPool:
             context: BrowserContext = await self._browser.new_context(**context_kwargs)
             page: Page = await context.new_page()
             logs: List[str] = []
-            page.on("console", lambda msg: logs.append(msg.text()))
+
+            # ---- SAFE console logger (Python uses .text property, not .text())
+            def _on_console(msg):
+                try:
+                    val = getattr(msg, "text", None)
+                    if callable(val):
+                        # Shouldn't happen in Python API, but guard just in case.
+                        txt = val()
+                    elif isinstance(val, str):
+                        txt = val
+                    else:
+                        txt = str(msg)
+                    logs.append(txt)
+                except Exception:
+                    # Never let console handler crash the page event loop
+                    try:
+                        logs.append(str(msg))
+                    except Exception:
+                        pass
+
+            page.on("console", _on_console)
+
             try:
                 yield page, logs
             finally:
@@ -120,7 +140,6 @@ async def fetch_rendered(
         viewport={"width": viewport[0], "height": viewport[1]},
     ) as (page, logs):
         # Navigate first with minimal blocking, then wait for the state we want.
-        # This avoids quirky errors like "Page.goto: 'str' object is not callable".
         try:
             resp = await page.goto(url, wait_until="commit", timeout=timeout_ms)
         except Exception:
