@@ -77,6 +77,47 @@ def _norm_url(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, ""))
 
 
+# --- compat for templates expecting derived fields
+def _enrich_for_template(r: dict) -> dict:
+    """Add legacy/template-friendly fields like title_length, h1_count, *_count, etc."""
+    o = dict(r)  # shallow copy so we don't mutate API payload
+    title = o.get("title") or ""
+    desc = o.get("description") or ""
+
+    # lengths
+    o["title_length"] = len(title)
+    o["description_length"] = len(desc)
+
+    # headings counts + first heading text
+    heads = o.get("headings") or {}
+    for lvl in ("h1", "h2", "h3", "h4", "h5", "h6"):
+        arr = heads.get(lvl) or []
+        o[f"{lvl}_count"] = len(arr)
+        o[f"first_{lvl}"] = (arr[0] if arr else "")
+
+    # social tags counts
+    o["og_count"] = len(o.get("open_graph") or {})
+    o["twitter_count"] = len(o.get("twitter_card") or {})
+
+    # link/data counts
+    for key in (
+        "internal_links",
+        "external_links",
+        "nofollow_links",
+        "images_missing_alt",
+        "hreflang",
+        "json_ld",
+        "microdata",
+        "rdfa",
+    ):
+        o[f"{key}_count"] = len(o.get(key) or [])
+
+    # convenience mirror for indexability
+    o["indexable"] = (o.get("checks", {}).get("indexable", {}).get("value") or "")
+
+    return o
+
+
 async def build_amp_compare_payload(url: str, request: Request | None):
     """
     Returns dict suitable for amp_compare.html:
@@ -215,7 +256,10 @@ async def analyze_get(request: Request, url: Optional[str] = Query(None)):
         if result.get("amp_url"):
             asyncio.create_task(_warm_compare_async(result["url"]))
 
-        return templates.TemplateResponse("index.html", {"request": request, "result": result})
+        # Enrich for templates that expect derived fields like title_length, h1_count, etc.
+        ui_result = _enrich_for_template(result)
+
+        return templates.TemplateResponse("index.html", {"request": request, "result": ui_result})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -243,6 +287,7 @@ async def api_analyze(url: HttpUrl):
         if result.get("amp_url"):
             asyncio.create_task(_warm_compare_async(result["url"]))
 
+        # API returns the raw analysis; front-end can compute lengths if needed
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
