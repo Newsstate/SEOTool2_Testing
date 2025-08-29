@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: seo-scanner-playwright
+    env: python
+    pythonVersion: 3.11.9
+    buildCommand: |
+      pip install -r requirements.txt
+      python -m playwright install --with-deps chromium
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: WORKERS
+        value: "1"   # Playwright browsers are heavy; start with 1-2 workers
+      - key: CONCURRENCY
+        value: "4"   # Max concurrent pages
+      - key: PAGE_TIMEOUT_MS
+        value: "35000"
